@@ -1,6 +1,5 @@
 from impact.utils import *
 from impact import impact_sampling
-from comfy_extras.chainner_models import model_loading
 from comfy import model_management
 import nodes
 
