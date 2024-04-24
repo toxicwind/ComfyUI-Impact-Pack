@@ -85,7 +85,7 @@ class SAMLoader:
         models = [x for x in folder_paths.get_filename_list("sams") if 'hq' not in x]
         return {
             "required": {
-                "model_name": (models, ),
+                "model_name": (models + ['ESAM'], ),
                 "device_mode": (["AUTO", "Prefer GPU", "CPU"],),
             }
         }
@@ -96,6 +96,26 @@ class SAMLoader:
     CATEGORY = "ImpactPack"
 
     def load_model(self, model_name, device_mode="auto"):
+        if model_name == 'ESAM':
+            if 'ESAM_ModelLoader_Zho' not in nodes.NODE_CLASS_MAPPINGS:
+                try_install_custom_node('https://github.com/ZHO-ZHO-ZHO/ComfyUI-YoloWorld-EfficientSAM',
+                                        "To use 'ESAM' model, 'ComfyUI-YoloWorld-EfficientSAM' extension is required.")
+                raise Exception("'ComfyUI-YoloWorld-EfficientSAM' node isn't installed.")
+
+            esam_loader = nodes.NODE_CLASS_MAPPINGS['ESAM_ModelLoader_Zho']()
+
+            if device_mode == 'CPU':
+                esam = esam_loader.load_esam_model('CPU')[0]
+            else:
+                device_mode = 'CUDA'
+                esam = esam_loader.load_esam_model('CUDA')[0]
+
+            sam_obj = core.ESAMWrapper(esam, device_mode)
+            esam.sam_wrapper = sam_obj
+            
+            print(f"Loads EfficientSAM model: (device:{device_mode})")
+            return (esam, )
+
         modelname = folder_paths.get_full_path("sams", model_name)
 
         if 'vit_h' in model_name:
@@ -107,15 +127,18 @@ class SAMLoader:
 
         sam = sam_model_registry[model_kind](checkpoint=modelname)
         size = os.path.getsize(modelname)
-        sam.safe_to = core.SafeToGPU(size)
+        safe_to = core.SafeToGPU(size)
 
         # Unless user explicitly wants to use CPU, we use GPU
         device = comfy.model_management.get_torch_device() if device_mode == "Prefer GPU" else "CPU"
 
         if device_mode == "Prefer GPU":
-            sam.safe_to.to_device(sam, device)
+            safe_to.to_device(sam, device)
 
-        sam.is_auto_mode = device_mode == "AUTO"
+        is_auto_mode = device_mode == "AUTO"
+
+        sam_obj = core.SAMWrapper(sam, is_auto_mode=is_auto_mode, safe_to_gpu=safe_to)
+        sam.sam_wrapper = sam_obj
 
         print(f"Loads SAM model: {modelname} (device:{device_mode})")
         return (sam, )
@@ -221,8 +244,7 @@ class DetailerForEach:
             ordered_segs = segs[1]
 
         for i, seg in enumerate(ordered_segs):
-            cropped_image = seg.cropped_image if seg.cropped_image is not None \
-                                              else crop_ndarray4(image.numpy(), seg.crop_region)
+            cropped_image = crop_ndarray4(image.numpy(), seg.crop_region)  # Never use seg.cropped_image to handle overlapping area
             cropped_image = to_tensor(cropped_image)
             mask = to_tensor(seg.cropped_mask)
             mask = tensor_gaussian_blur_mask(mask, feather)
@@ -246,9 +268,25 @@ class DetailerForEach:
 
             seg_seed = seed + i if seg_seed is None else seg_seed
 
+            cropped_positive = [
+                [condition, {
+                    k: core.crop_condition_mask(v, image, seg.crop_region) if k == "mask" else v
+                    for k, v in details.items()
+                }]
+                for condition, details in positive
+            ]
+
+            cropped_negative = [
+                [condition, {
+                    k: core.crop_condition_mask(v, image, seg.crop_region) if k == "mask" else v
+                    for k, v in details.items()
+                }]
+                for condition, details in negative
+            ]
+
             enhanced_image, cnet_pils = core.enhance_detail(cropped_image, model, clip, vae, guide_size, guide_size_for_bbox, max_size,
                                                             seg.bbox, seg_seed, steps, cfg, sampler_name, scheduler,
-                                                            positive, negative, denoise, cropped_mask, force_inpaint,
+                                                            cropped_positive, cropped_negative, denoise, cropped_mask, force_inpaint,
                                                             wildcard_opt=wildcard_item, wildcard_opt_concat_mode=wildcard_concat_mode,
                                                             detailer_hook=detailer_hook,
                                                             refiner_ratio=refiner_ratio, refiner_model=refiner_model,
@@ -1611,7 +1649,7 @@ class SubtractMaskForEach:
                     item = SEG(bseg.cropped_image, cropped_mask1, bseg.confidence, bseg.crop_region, bseg.bbox, bseg.label, None)
                     result.append(item)
                 else:
-                    result.append(base_segs)
+                    result.append(bseg)
 
         return ((base_segs[0], result),)
 

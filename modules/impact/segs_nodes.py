@@ -84,9 +84,25 @@ class SEGSDetailer:
                 else:
                     cropped_mask = None
 
+                cropped_positive = [
+                    [condition, {
+                        k: core.crop_condition_mask(v, image, seg.crop_region) if k == "mask" else v
+                        for k, v in details.items()
+                    }]
+                    for condition, details in positive
+                ]
+
+                cropped_negative = [
+                    [condition, {
+                        k: core.crop_condition_mask(v, image, seg.crop_region) if k == "mask" else v
+                        for k, v in details.items()
+                    }]
+                    for condition, details in negative
+                ]
+
                 enhanced_image, cnet_pils = core.enhance_detail(cropped_image, model, clip, vae, guide_size, guide_size_for, max_size,
                                                                 seg.bbox, seed, steps, cfg, sampler_name, scheduler,
-                                                                positive, negative, denoise, cropped_mask, force_inpaint,
+                                                                cropped_positive, cropped_negative, denoise, cropped_mask, force_inpaint,
                                                                 refiner_ratio=refiner_ratio, refiner_model=refiner_model,
                                                                 refiner_clip=refiner_clip, refiner_positive=refiner_positive, refiner_negative=refiner_negative,
                                                                 control_net_wrapper=seg.control_net_wrapper, cycle=cycle,
@@ -1182,7 +1198,11 @@ class IPAdapterApplySEGS:
                     "weight_v2": ("FLOAT", {"default": 1.0, "min": -1, "max": 3, "step": 0.05}),
                     "context_crop_factor": ("FLOAT", {"default": 1.2, "min": 1.0, "max": 100, "step": 0.1}),
                     "reference_image": ("IMAGE",),
-                    }
+                    },
+                "optional": {
+                    "combine_embeds": (["concat", "add", "subtract", "average", "norm average"],),
+                    "neg_image": ("IMAGE",),
+                    },
                 }
 
     RETURN_TYPES = ("SEGS",)
@@ -1190,7 +1210,7 @@ class IPAdapterApplySEGS:
 
     CATEGORY = "ImpactPack/Util"
 
-    def doit(self, segs, ipadapter_pipe, weight, noise, weight_type, start_at, end_at, unfold_batch, faceid_v2, weight_v2, context_crop_factor, reference_image):
+    def doit(self, segs, ipadapter_pipe, weight, noise, weight_type, start_at, end_at, unfold_batch, faceid_v2, weight_v2, context_crop_factor, reference_image, combine_embeds="concat", neg_image=None):
 
         if len(ipadapter_pipe) == 4:
             print(f"[Impact Pack] IPAdapterApplySEGS: Installed Inspire Pack is outdated.")
@@ -1208,7 +1228,7 @@ class IPAdapterApplySEGS:
             context_crop_region = make_crop_region(w, h, seg.crop_region, context_crop_factor)
             cropped_image = crop_image(reference_image, context_crop_region)
 
-            control_net_wrapper = core.IPAdapterWrapper(ipadapter_pipe, weight, noise, weight_type, start_at, end_at, unfold_batch, faceid_v2, weight_v2, cropped_image, prev_control_net=seg.control_net_wrapper)
+            control_net_wrapper = core.IPAdapterWrapper(ipadapter_pipe, weight, noise, weight_type, start_at, end_at, unfold_batch, weight_v2, cropped_image, neg_image=neg_image, prev_control_net=seg.control_net_wrapper, combine_embeds=combine_embeds)
             new_seg = SEG(seg.cropped_image, seg.cropped_mask, seg.confidence, seg.crop_region, seg.bbox, seg.label, control_net_wrapper)
             new_segs.append(new_seg)
 
@@ -1363,7 +1383,7 @@ class SEGSPicker:
             else:
                 cropped_image = empty_pil_tensor()
 
-            mask_array = seg.cropped_mask
+            mask_array = seg.cropped_mask.copy()
             mask_array[mask_array < 0.3] = 0.3
             mask_array = mask_array[None, ..., None]
             cropped_image = cropped_image * mask_array
