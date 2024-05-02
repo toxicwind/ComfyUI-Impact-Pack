@@ -2,9 +2,17 @@ import nodes
 from comfy.k_diffusion import sampling as k_diffusion_sampling
 from comfy import samplers
 from comfy_extras import nodes_custom_sampler
-
+import latent_preview
+import comfy
 import torch
 import math
+
+
+try:
+    from comfy_extras.nodes_custom_sampler import Noise_EmptyNoise, Noise_RandomNoise
+except:
+    print(f"\n#############################################\n[Impact Pack] ComfyUI is an outdated version.\n#############################################\n")
+    raise Exception("[Impact Pack] ComfyUI is an outdated version.")
 
 
 def calculate_sigmas(model, sampler, scheduler, steps):
@@ -13,11 +21,10 @@ def calculate_sigmas(model, sampler, scheduler, steps):
         steps += 1
         discard_penultimate_sigma = True
 
-    if hasattr(samplers, 'calculate_sigmas'):
-        sigmas = samplers.calculate_sigmas(model.get_model_object("model_sampling"), scheduler, steps)
+    if scheduler.startswith('AYS'):
+        sigmas = nodes.NODE_CLASS_MAPPINGS['AlignYourStepsScheduler']().get_sigmas(scheduler[4:], steps, denoise=1.0)[0]
     else:
-        print(f"[Impact Pack] calculate_sigmas: ComfyUI is an outdated version.")
-        sigmas = samplers.calculate_sigmas_scheduler(model.model, scheduler, steps)
+        sigmas = samplers.calculate_sigmas(model.get_model_object("model_sampling"), scheduler, steps)
 
     if discard_penultimate_sigma:
         sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
@@ -79,7 +86,7 @@ def ksampler(sampler_name, total_sigmas, extra_options={}, inpaint_options={}):
             if noise_sampler is not None:
                 kwargs['noise_sampler'] = noise_sampler
 
-            return k_diffusion_sampling.sample_dpmpp_2m_sde(model, x, sigmas, **kwargs)
+            return k_diffusion_sampling.sample_dpmpp_3m_sde(model, x, sigmas, **kwargs)
 
         sampler_function = sample_dpmpp_sde
 
@@ -89,23 +96,73 @@ def ksampler(sampler_name, total_sigmas, extra_options={}, inpaint_options={}):
             if noise_sampler is not None:
                 kwargs['noise_sampler'] = noise_sampler
 
-            return k_diffusion_sampling.sample_dpmpp_2m_sde_gpu(model, x, sigmas, **kwargs)
+            return k_diffusion_sampling.sample_dpmpp_3m_sde_gpu(model, x, sigmas, **kwargs)
 
         sampler_function = sample_dpmpp_sde
     else:
-        return samplers.ksampler(sampler_name, extra_options, inpaint_options)
+        if sampler_name == 'ddim':
+            return samplers.ksampler("euler", inpaint_options={"random": True})
+        else:
+            return samplers.ksampler(sampler_name, extra_options, inpaint_options)
 
     return samplers.KSAMPLER(sampler_function, extra_options, inpaint_options)
 
 
+# modified version of SamplerCustom.sample
+def sample_with_custom_noise(model, add_noise, noise_seed, cfg, positive, negative, sampler, sigmas, latent_image, noise=None):
+    latent = latent_image
+    latent_image = latent["samples"]
+
+    if noise is None:
+        if not add_noise:
+            noise = Noise_EmptyNoise().generate_noise(latent)
+        else:
+            noise = Noise_RandomNoise(noise_seed).generate_noise(latent)
+
+    noise_mask = None
+    if "noise_mask" in latent:
+        noise_mask = latent["noise_mask"]
+
+    x0_output = {}
+    callback = latent_preview.prepare_callback(model, sigmas.shape[-1] - 1, x0_output)
+
+    disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+    samples = comfy.sample.sample_custom(model, noise, cfg, sampler, sigmas, positive, negative, latent_image, noise_mask=noise_mask, callback=callback, disable_pbar=disable_pbar, seed=noise_seed)
+
+    out = latent.copy()
+    out["samples"] = samples
+    if "x0" in x0_output:
+        out_denoised = latent.copy()
+        out_denoised["samples"] = model.model.process_latent_out(x0_output["x0"].cpu())
+    else:
+        out_denoised = out
+    return out, out_denoised
+
+
+# When sampling one step at a time, it mitigates the problem. (especially for _sde series samplers)
 def separated_sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler, positive, negative,
-                     latent_image, start_at_step, end_at_step, return_with_leftover_noise, sigma_ratio=1.0, sampler_opt=None):
+                     latent_image, start_at_step, end_at_step, return_with_leftover_noise, sigma_ratio=1.0, sampler_opt=None, noise=None):
     if sampler_opt is None:
         total_sigmas = calculate_sigmas(model, sampler_name, scheduler, steps)
     else:
         total_sigmas = calculate_sigmas(model, "", scheduler, steps)
 
-    sigmas = total_sigmas[start_at_step:end_at_step+1] * sigma_ratio
+    sigmas = total_sigmas
+
+    if end_at_step is not None and end_at_step < (len(total_sigmas) - 1):
+        sigmas = total_sigmas[:end_at_step + 1]
+        if not return_with_leftover_noise:
+            sigmas[-1] = 0
+
+    if start_at_step is not None:
+        if start_at_step < (len(sigmas) - 1):
+            sigmas = sigmas[start_at_step:] * sigma_ratio
+        else:
+            if latent_image is not None:
+                return latent_image
+            else:
+                return torch.zeros_like(noise)
+
     if sampler_opt is None:
         impact_sampler = ksampler(sampler_name, total_sigmas)
     else:
@@ -114,7 +171,7 @@ def separated_sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler
     if len(sigmas) == 0 or (len(sigmas) == 1 and sigmas[0] == 0):
         return latent_image
     
-    res = nodes_custom_sampler.SamplerCustom().sample(model, add_noise, seed, cfg, positive, negative, impact_sampler, sigmas, latent_image)
+    res = sample_with_custom_noise(model, add_noise, seed, cfg, positive, negative, impact_sampler, sigmas, latent_image, noise=noise)
 
     if return_with_leftover_noise:
         return res[0]
@@ -122,11 +179,25 @@ def separated_sample(model, add_noise, seed, steps, cfg, sampler_name, scheduler
         return res[1]
 
 
+def impact_sample(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0, sigma_ratio=1.0, sampler_opt=None, noise=None):
+    advanced_steps = math.floor(steps / denoise)
+    start_at_step = advanced_steps - steps
+    end_at_step = start_at_step + steps
+    return separated_sample(model, True, seed, advanced_steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, False)
+
+
 def ksampler_wrapper(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise,
-                     refiner_ratio=None, refiner_model=None, refiner_clip=None, refiner_positive=None, refiner_negative=None, sigma_factor=1.0):
+                     refiner_ratio=None, refiner_model=None, refiner_clip=None, refiner_positive=None, refiner_negative=None, sigma_factor=1.0, noise=None):
 
     if refiner_ratio is None or refiner_model is None or refiner_clip is None or refiner_positive is None or refiner_negative is None:
-        refined_latent = nodes.KSampler().sample(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise * sigma_factor)[0]
+        # Use separated_sample instead of KSampler for `AYS scheduler`
+        # refined_latent = nodes.KSampler().sample(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise * sigma_factor)[0]
+
+        advanced_steps = math.floor(steps / denoise)
+        start_at_step = advanced_steps - steps
+        end_at_step = start_at_step + steps
+
+        refined_latent = separated_sample(model, True, seed, advanced_steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, False, sigma_ratio=sigma_factor, noise=noise)
     else:
         advanced_steps = math.floor(steps / denoise)
         start_at_step = advanced_steps - steps
@@ -134,7 +205,7 @@ def ksampler_wrapper(model, seed, steps, cfg, sampler_name, scheduler, positive,
 
         # print(f"pre: {start_at_step} .. {end_at_step} / {advanced_steps}")
         temp_latent = separated_sample(model, True, seed, advanced_steps, cfg, sampler_name, scheduler,
-                                       positive, negative, latent_image, start_at_step, end_at_step, True, sigma_ratio=sigma_factor)
+                                       positive, negative, latent_image, start_at_step, end_at_step, True, sigma_ratio=sigma_factor, noise=noise)
 
         if 'noise_mask' in latent_image:
             # noise_latent = \

@@ -1,6 +1,6 @@
 import copy
+import torch
 import nodes
-
 from impact import utils
 from . import segs_nodes
 from thirdparty import noise_nodes
@@ -8,6 +8,9 @@ from server import PromptServer
 import asyncio
 import folder_paths
 import os
+from comfy_extras import nodes_custom_sampler
+import math
+
 
 class PixelKSampleHook:
     cur_step = 0
@@ -101,6 +104,15 @@ class DetailerHookCombine(PixelKSampleHookCombine):
         image = self.hook2.post_paste(image)
         return image
 
+    def get_custom_noise(self, seed, noise, is_start):
+        noise_1st = self.hook1.get_custom_noise(seed, noise, is_start)
+        noise, is_start = (noise_1st, False) if noise_1st is not None else (noise, is_start)
+
+        noise_2nd = self.hook2.get_custom_noise(seed, noise, False)
+        noise = noise_2nd if noise_2nd is not None else noise
+
+        return noise
+
 
 class SimpleCfgScheduleHook(PixelKSampleHook):
     target_cfg = 0
@@ -161,6 +173,39 @@ class DetailerHook(PixelKSampleHook):
 
     def post_paste(self, image):
         return image
+
+    def get_custom_noise(self, seed, noise, is_start):
+        return noise
+
+
+# class CustomNoiseDetailerHookProvider(DetailerHook):
+#     def __init__(self, noise):
+#         super().__init__()
+#         self.noise = noise
+#
+#     def get_custom_noise(self, seed, noise, is_start):
+#         return self.noise
+
+
+class VariationNoiseDetailerHookProvider(DetailerHook):
+    def __init__(self, variation_seed, variation_strength):
+        super().__init__()
+        self.variation_seed = variation_seed
+        self.variation_strength = variation_strength
+
+    def get_custom_noise(self, seed, noise, is_start):
+        empty_noise = {'samples': torch.zeros(noise.size())}
+        if is_start:
+            noise = nodes_custom_sampler.Noise_RandomNoise(seed).generate_noise(empty_noise)
+        noise_2nd = nodes_custom_sampler.Noise_RandomNoise(self.variation_seed).generate_noise(empty_noise)
+
+        mixed_noise = ((1 - self.variation_strength) * noise + self.variation_strength * noise_2nd)
+
+        # NOTE: mixed_noise is not gaussian noise; therefore, adjust the scale to correct it to gaussian noise.
+        scale_factor = math.sqrt((1 - self.variation_strength) ** 2 + self.variation_strength ** 2)
+        corrected_noise = mixed_noise / scale_factor  # Scale the noise to maintain variance of 1
+
+        return corrected_noise
 
 
 class SimpleDetailerDenoiseSchedulerHook(DetailerHook):
@@ -300,14 +345,7 @@ class UnsamplerHook(PixelKSampleHook):
     def post_encode(self, samples):
         cur_step = self.cur_step
 
-        try:
-            Unsampler = noise_nodes.Unsampler
-        except:
-            if 'BNK_Unsampler' not in nodes.NODE_CLASS_MAPPINGS:
-                print("[Impact Pack] ERROR: ComfyUI version is outdated and the BNK_Unsampler node is not installed, so this feature cannot be used.")
-                raise Exception("ERROR: ComfyUI version is outdated and the BNK_Unsampler node is not installed, so this feature cannot be used.")
-
-            Unsampler = nodes.NODE_CLASS_MAPPINGS['BNK_Unsampler']
+        Unsampler = noise_nodes.Unsampler
 
         end_at_step = self.start_end_at_step + (self.end_end_at_step - self.start_end_at_step) * cur_step / self.total_step
         end_at_step = int(end_at_step)
