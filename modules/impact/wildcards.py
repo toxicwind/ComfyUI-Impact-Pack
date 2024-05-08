@@ -8,7 +8,7 @@ import numpy as np
 import threading
 from impact import utils
 
-
+RE_WildCardQuantifier = re.compile(r"(?P<quantifier>\d+)#__(?P<keyword>[\w.\-+/*\\]+)__", re.IGNORECASE)
 wildcard_lock = threading.Lock()
 wildcard_dict = {}
 
@@ -170,7 +170,7 @@ def process(text, seed=None):
                 replacements_found = True
                 string = string.replace(f"__{match}__", replacement, 1)
             elif '*' in keyword:
-                subpattern = keyword.replace('*', '.*').replace('+','\+')
+                subpattern = keyword.replace('*', '.*').replace('+','\\+')
                 total_patterns = []
                 found = False
                 for k, v in local_wildcard_dict.items():
@@ -192,6 +192,15 @@ def process(text, seed=None):
     stop_unwrap = False
     while not stop_unwrap and replace_depth > 1:
         replace_depth -= 1  # prevent infinite loop
+        
+        option_quantifier = [e.groupdict() for e in RE_WildCardQuantifier.finditer(text)]
+        for match in option_quantifier:
+            keyword = match['keyword'].lower()
+            quantifier = int(match['quantifier']) if match['quantifier'] else 1
+            replacement = '__|__'.join([keyword,] * quantifier)
+            wilder_keyword = keyword.replace('*', '\\*')
+            RE_TEMP = re.compile(fr"(?P<quantifier>\d+)#__(?P<keyword>{wilder_keyword})__", re.IGNORECASE)
+            text = RE_TEMP.sub(f"__{replacement}__", text)
 
         # pass1: replace options
         pass1, is_replaced1 = replace_options(text)

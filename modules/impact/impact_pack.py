@@ -306,7 +306,7 @@ class DetailerForEach:
                 enhanced_list.append(enhanced_image)
 
                 if detailer_hook is not None:
-                    detailer_hook.post_paste(image)
+                    image = detailer_hook.post_paste(image)
 
             if not (enhanced_image is None):
                 # Convert enhanced_pil_alpha to RGBA mode
@@ -1010,7 +1010,7 @@ class PixelKSampleUpscalerProvider:
                     "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
                     "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0}),
                     "sampler_name": (comfy.samplers.KSampler.SAMPLERS, ),
-                    "scheduler": (comfy.samplers.KSampler.SCHEDULERS, ),
+                    "scheduler": (core.SCHEDULERS, ),
                     "positive": ("CONDITIONING", ),
                     "negative": ("CONDITIONING", ),
                     "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
@@ -1047,7 +1047,7 @@ class PixelKSampleUpscalerProviderPipe(PixelKSampleUpscalerProvider):
                     "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
                     "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0}),
                     "sampler_name": (comfy.samplers.KSampler.SAMPLERS, ),
-                    "scheduler": (comfy.samplers.KSampler.SCHEDULERS, ),
+                    "scheduler": (core.SCHEDULERS, ),
                     "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                     "use_tiled_vae": ("BOOLEAN", {"default": False, "label_on": "enabled", "label_off": "disabled"}),
                     "basic_pipe": ("BASIC_PIPE",),
