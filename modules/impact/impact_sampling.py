@@ -99,11 +99,9 @@ def ksampler(sampler_name, total_sigmas, extra_options={}, inpaint_options={}):
             return k_diffusion_sampling.sample_dpmpp_3m_sde_gpu(model, x, sigmas, **kwargs)
 
         sampler_function = sample_dpmpp_sde
+
     else:
-        if sampler_name == 'ddim':
-            return samplers.ksampler("euler", inpaint_options={"random": True})
-        else:
-            return samplers.ksampler(sampler_name, extra_options, inpaint_options)
+        return comfy.samplers.sampler_object(sampler_name)
 
     return samplers.KSAMPLER(sampler_function, extra_options, inpaint_options)
 
